@@ -1,51 +1,41 @@
 // File: api/loader.js
-// Vercel Serverless Function - v1.1 (Robust Parsing)
+// Vercel Serverless Function - v1.2 (Flexible ID Parsing)
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const REPO_OWNER = process.env.REPO_OWNER;
 const REPO_NAME = process.env.REPO_NAME;
 
-// Helper function to fetch file content from the private GitHub repository
 async function getFileFromGitHub(path) {
   const url = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${path}`;
-  const headers = {
-    'Authorization': `token ${GITHUB_TOKEN}`,
-    'Accept': 'application/vnd.github.v3.raw',
-  };
-  
+  const headers = { 'Authorization': `token ${GITHUB_TOKEN}`, 'Accept': 'application/vnd.github.v3.raw' };
   const response = await fetch(url, { headers });
-
   if (!response.ok) {
-    if (response.status === 404) {
-      return null;
-    }
-    throw new Error(`GitHub API request failed for path ${path}: ${response.status} ${response.statusText}`);
+    if (response.status === 404) { return null; }
+    throw new Error(`GitHub API request failed for path ${path}: ${response.statusText}`);
   }
-
   return response.text();
 }
 
-// The main serverless function handler
 export default async function handler(request, response) {
   try {
     const url = new URL(request.url, `https://${request.headers.host}`);
-    let customerId = url.pathname.slice(1);
+    let customerId = null;
 
-    // --- FIX: Sanitize the customerId ---
-    if (customerId) {
-        // 1. Remove trailing slash if it exists
-        if (customerId.endsWith('/')) {
-          customerId = customerId.slice(0, -1);
-        }
-        // 2. Remove .js extension if it exists
-        if (customerId.endsWith('.js')) {
-          customerId = customerId.slice(0, -3);
-        }
+    const queryId = url.searchParams.get('id');
+    if (queryId) {
+      customerId = queryId;
+    } else {
+      let pathId = url.pathname;
+      if (pathId.startsWith('/')) { pathId = pathId.slice(1); }
+      if (pathId) {
+          if (pathId.endsWith('/')) { pathId = pathId.slice(0, -1); }
+          if (pathId.endsWith('.js')) { pathId = pathId.slice(0, -3); }
+          customerId = pathId;
+      }
     }
-    // --- END FIX ---
 
     if (!customerId) {
-      return response.status(400).send('Error: Customer ID is missing or invalid in the request URL.');
+      return response.status(400).send('Error: Customer ID could not be determined.');
     }
 
     const coreScriptPath = 'configs/chatbot-core.js';
@@ -59,13 +49,12 @@ export default async function handler(request, response) {
     let finalConfigContent = customerJsonContent;
     if (!finalConfigContent) {
       console.warn(`Config for customer "${customerId}" not found. Falling back to default.`);
-      const defaultConfigPath = 'configs/default.json';
-      finalConfigContent = await getFileFromGitHub(defaultConfigPath);
+      finalConfigContent = await getFileFromGitHub('configs/default.json');
       if (!finalConfigContent) {
-        return response.status(404).send('Error: Default configuration not found.');
+        return response.status(404).send('Error: Default configuration could not be found.');
       }
     }
-    
+
     if (!coreJsContent) {
         return response.status(500).send('Error: Core chatbot script could not be loaded.');
     }
@@ -77,8 +66,7 @@ export default async function handler(request, response) {
 
     return response.status(200).send(finalScript);
 
-  } catch (error)
-  {
+  } catch (error) {
     console.error('An error occurred in the proxy loader:', error);
     return response.status(500).send('// Server Error: Could not process the request.');
   }
