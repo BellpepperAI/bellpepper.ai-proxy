@@ -1,74 +1,82 @@
 // File: api/loader.js
+// Vercel Serverless Function to securely assemble and serve the agent script.
 
-export const config = {
-  runtime: 'edge',
-};
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const REPO_OWNER = process.env.REPO_OWNER;
+const REPO_NAME = process.env.REPO_NAME;
 
-// Helper function to fetch a file from your private GitHub repo
-async function fetchFromGitHub(filePath, githubToken) {
-  const apiUrl = `https://api.github.com/repos/${process.env.REPO_OWNER}/${process.env.REPO_NAME}/contents/${filePath}`;
+// Helper function to fetch file content from the private GitHub repository
+async function getFileFromGitHub(path) {
+  const url = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${path}`;
+  const headers = {
+    'Authorization': `token ${GITHUB_TOKEN}`,
+    'Accept': 'application/vnd.github.v3.raw', // Important: gets the raw file content
+  };
   
-  const response = await fetch(apiUrl, {
-    headers: {
-      'Authorization': `Bearer ${githubToken}`,
-      'Accept': 'application/vnd.github.v3.raw', // Fetches the raw file content directly
-    },
-    // Cache GitHub API responses for 60 seconds. This prevents hitting rate limits
-    // during a burst of requests to uncached regions.
-    next: { revalidate: 60 } 
-  });
+  const response = await fetch(url, { headers });
 
   if (!response.ok) {
+    // If the file is not found, return null to handle fallback logic
     if (response.status === 404) {
-      throw new Error(`File not found in repo: ${filePath}`);
+      return null;
     }
-    throw new Error(`GitHub API Error for ${filePath}: ${response.status}`);
+    // For other errors, throw an exception
+    throw new Error(`GitHub API request failed for path ${path}: ${response.status} ${response.statusText}`);
   }
-  
+
   return response.text();
 }
 
-export default async function handler(req) {
-  const { searchParams } = new URL(req.url);
-  // Use the 'id' parameter from the URL, but fall back to 'default' if it's missing.
-  let customerId = searchParams.get('id') || 'default';
-
-  // Security: Sanitize the ID to ensure it only contains safe characters.
-  if (!/^[a-zA-Z0-9_-]+$/.test(customerId)) {
-    return new Response('// Error: Invalid customer ID format.', { status: 400 });
-  }
-
-  const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-
-  // These paths match your desired structure in the 'bellpepper-ai-agents' repo.
-  const configFilePath = `configs/customers/${customerId}.json`;
-  const coreScriptPath = `configs/chatbot-core.js`;
-  const defaultConfigPath = `configs/default.json`;
-
+// The main serverless function handler
+export default async function handler(request, response) {
   try {
-    // Fetch the core script and the config file at the same time for best performance.
-    const [configJsonString, coreScriptContent] = await Promise.all([
-      fetchFromGitHub(configFilePath, GITHUB_TOKEN).catch(err => {
-        // If the customer-specific config isn't found, try to load the default one.
-        console.warn(`Config for '${customerId}' not found, falling back to default.`);
-        return fetchFromGitHub(defaultConfigPath, GITHUB_TOKEN);
-      }),
-      fetchFromGitHub(coreScriptPath, GITHUB_TOKEN)
+    // Extract customer ID from the URL path (e.g., /customer-a -> customer-a)
+    const url = new URL(request.url, `https://${request.headers.host}`);
+    const customerId = url.pathname.slice(1);
+
+    if (!customerId) {
+      return response.status(400).send('Error: Customer ID is missing in the request URL.');
+    }
+
+    // Define paths to the files in the private repository
+    const coreScriptPath = 'configs/chatbot-core.js';
+    let customerConfigPath = `configs/customers/${customerId}.json`;
+
+    // Fetch the core script and customer config in parallel for performance
+    const [coreJsContent, customerJsonContent] = await Promise.all([
+      getFileFromGitHub(coreScriptPath),
+      getFileFromGitHub(customerConfigPath)
     ]);
 
-    // Assemble the final, personalized script.
-    const finalScript = `window.ChatWidgetConfig = ${configJsonString};\n\n${coreScriptContent}`;
+    // Handle fallback to default config if customer-specific config is not found
+    let finalConfigContent = customerJsonContent;
+    if (!finalConfigContent) {
+      console.warn(`Config for customer "${customerId}" not found. Falling back to default.`);
+      const defaultConfigPath = 'configs/default.json';
+      finalConfigContent = await getFileFromGitHub(defaultConfigPath);
+      if (!finalConfigContent) {
+        return response.status(404).send('Error: Default configuration not found.');
+      }
+    }
+    
+    if (!coreJsContent) {
+        return response.status(500).send('Error: Core chatbot script could not be loaded.');
+    }
 
-    // Set high-performance caching headers for Vercel's Edge Network and browsers.
-    const headers = {
-      'Content-Type': 'application/javascript; charset=utf-8',
-      'Cache-Control': 'public, s-maxage=3600, max-age=300, stale-while-revalidate',
-    };
+    // Assemble the final script
+    // 1. Create the window.ChatWidgetConfig object from the JSON content.
+    // 2. Append the core chatbot engine script.
+    const finalScript = `window.ChatWidgetConfig = ${finalConfigContent};\n\n${coreJsContent}`;
 
-    return new Response(finalScript, { status: 200, headers });
+    // Set response headers for JavaScript content and Vercel Edge Caching
+    response.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    response.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate'); // 1 hour CDN cache
+
+    // Send the assembled script as the response
+    return response.status(200).send(finalScript);
 
   } catch (error) {
-    console.error(`Fatal error for customerId '${customerId}':`, error.message);
-    return new Response('// Error: Could not build chatbot script.', { status: 500 });
+    console.error('An error occurred in the proxy loader:', error);
+    return response.status(500).send('// Server Error: Could not process the request.');
   }
 }
