@@ -1,5 +1,5 @@
 // File: api/loader.js
-// Vercel Serverless Function - v1.4 (CORS Fix)
+// Vercel Serverless Function - v1.5 (Full CORS & Environment Fix)
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const REPO_OWNER = process.env.REPO_OWNER;
@@ -7,6 +7,8 @@ const REPO_NAME = process.env.REPO_NAME;
 
 // Determine the branch from Vercel's environment variables. Default to 'main'.
 const GIT_BRANCH = process.env.VERCEL_GIT_COMMIT_REF || 'main';
+// Determine the environment from Vercel's system variables.
+const VERCEL_ENV = process.env.VERCEL_ENV || 'development';
 
 /**
  * Fetches a file from a specific branch in the GitHub repository.
@@ -35,6 +37,15 @@ async function getFileFromGitHub(path, ref) {
 }
 
 export default async function handler(request, response) {
+  // --- PREFLIGHT REQUEST (CORS) ---
+  // Handle OPTIONS requests for CORS preflight. This must come before any other logic.
+  if (request.method === 'OPTIONS') {
+    response.setHeader('Access-Control-Allow-Origin', '*');
+    response.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    return response.status(204).send('');
+  }
+
   try {
     const url = new URL(request.url, `https://${request.headers.host}`);
     let customerId = null;
@@ -81,31 +92,33 @@ export default async function handler(request, response) {
       return response.status(500).send('// Error: Core chatbot script could not be loaded from branch "${GIT_BRANCH}".');
     }
 
-    const finalScript = `// Branch: ${GIT_BRANCH}\nwindow.ChatWidgetConfig = ${finalConfigContent};\n\n${coreJsContent}`;
+    const finalScript = `// Vercel Env: ${VERCEL_ENV} | Branch: ${GIT_BRANCH}\nwindow.ChatWidgetConfig = ${finalConfigContent};\n\n${coreJsContent}`;
 
     // --- HEADER CONFIGURATION ---
 
-    // **NEW**: Add the CORS header to allow any domain to fetch this script.
+    // Add the CORS header to allow any domain to fetch this script.
     response.setHeader('Access-Control-Allow-Origin', '*');
 
     // Set the response content type
     response.setHeader('Content-Type', 'application/javascript; charset=utf-8');
 
-    // Set cache headers based on the branch
-    if (GIT_BRANCH === 'test' || GIT_BRANCH.startsWith('dependabot')) {
-      // For the test branch or dependabot branches, do not cache.
+    // Set cache headers based on the Vercel environment (best practice)
+    if (VERCEL_ENV !== 'production') {
+      // For any non-production environment (Preview, Development), do not cache.
       response.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-      console.log(`Cache disabled for "${GIT_BRANCH}" branch.`);
+      console.log(`Cache disabled for non-production environment: "${VERCEL_ENV}"`);
     } else {
-      // For the main (production) branch, cache for 1 hour.
+      // For the production environment, cache for 1 hour.
       response.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate');
-      console.log(`Production cache set for "${GIT_BRANCH}" branch.`);
+      console.log(`Production cache set for environment: "${VERCEL_ENV}"`);
     }
 
     return response.status(200).send(finalScript);
 
   } catch (error) {
     console.error('An error occurred in the proxy loader:', error);
+    // Also add CORS header to error responses so the browser can read them
+    response.setHeader('Access-Control-Allow-Origin', '*');
     return response.status(500).send('// Server Error: Could not process the request.');
   }
 }
