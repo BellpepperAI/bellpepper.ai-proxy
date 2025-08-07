@@ -1,17 +1,35 @@
 // File: api/loader.js
-// Vercel Serverless Function - v1.2 (Flexible ID Parsing)
+// Vercel Serverless Function - v1.3 (Branch-Aware Caching)
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const REPO_OWNER = process.env.REPO_OWNER;
 const REPO_NAME = process.env.REPO_NAME;
 
-async function getFileFromGitHub(path) {
-  const url = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${path}`;
-  const headers = { 'Authorization': `token ${GITHUB_TOKEN}`, 'Accept': 'application/vnd.github.v3.raw' };
+// Determine the branch from Vercel's environment variables. Default to 'main'.
+const GIT_BRANCH = process.env.VERCEL_GIT_COMMIT_REF || 'main';
+
+/**
+ * Fetches a file from a specific branch in the GitHub repository.
+ * @param {string} path - The path to the file in the repository.
+ * @param {string} ref - The git branch, tag, or commit SHA.
+ * @returns {Promise<string|null>} The file content as text, or null if not found.
+ */
+async function getFileFromGitHub(path, ref) {
+  // Construct the URL to fetch the file from a specific ref (branch)
+  const url = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${path}?ref=${ref}`;
+  const headers = {
+    'Authorization': `token ${GITHUB_TOKEN}`,
+    'Accept': 'application/vnd.github.v3.raw'
+  };
+
   const response = await fetch(url, { headers });
+
   if (!response.ok) {
-    if (response.status === 404) { return null; }
-    throw new Error(`GitHub API request failed for path ${path}: ${response.statusText}`);
+    if (response.status === 404) {
+      console.warn(`File not found at path ${path} in branch ${ref}`);
+      return null;
+    }
+    throw new Error(`GitHub API request failed for path ${path} in branch ${ref}: ${response.statusText}`);
   }
   return response.text();
 }
@@ -21,6 +39,7 @@ export default async function handler(request, response) {
     const url = new URL(request.url, `https://${request.headers.host}`);
     let customerId = null;
 
+    // Flexible Customer ID parsing (from query param or path)
     const queryId = url.searchParams.get('id');
     if (queryId) {
       customerId = queryId;
@@ -28,41 +47,55 @@ export default async function handler(request, response) {
       let pathId = url.pathname;
       if (pathId.startsWith('/')) { pathId = pathId.slice(1); }
       if (pathId) {
-          if (pathId.endsWith('/')) { pathId = pathId.slice(0, -1); }
-          if (pathId.endsWith('.js')) { pathId = pathId.slice(0, -3); }
-          customerId = pathId;
+        if (pathId.endsWith('/')) { pathId = pathId.slice(0, -1); }
+        if (pathId.endsWith('.js')) { pathId = pathId.slice(0, -3); }
+        customerId = pathId;
       }
     }
 
     if (!customerId) {
-      return response.status(400).send('Error: Customer ID could not be determined.');
+      return response.status(400).send('// Error: Customer ID could not be determined.');
     }
 
-    const coreScriptPath = 'configs/chatbot-core.js';
-    let customerConfigPath = `configs/customers/${customerId}.json`;
+    console.log(`Processing request for customer: "${customerId}" on branch: "${GIT_BRANCH}"`);
 
+    const coreScriptPath = 'configs/chatbot-core.js';
+    const customerConfigPath = `configs/customers/${customerId}.json`;
+
+    // Fetch files from the determined git branch
     const [coreJsContent, customerJsonContent] = await Promise.all([
-      getFileFromGitHub(coreScriptPath),
-      getFileFromGitHub(customerConfigPath)
+      getFileFromGitHub(coreScriptPath, GIT_BRANCH),
+      getFileFromGitHub(customerConfigPath, GIT_BRANCH)
     ]);
 
     let finalConfigContent = customerJsonContent;
     if (!finalConfigContent) {
-      console.warn(`Config for customer "${customerId}" not found. Falling back to default.`);
-      finalConfigContent = await getFileFromGitHub('configs/default.json');
+      console.warn(`Config for customer "${customerId}" in branch "${GIT_BRANCH}" not found. Falling back to default.`);
+      finalConfigContent = await getFileFromGitHub('configs/default.json', GIT_BRANCH);
       if (!finalConfigContent) {
-        return response.status(404).send('Error: Default configuration could not be found.');
+        return response.status(404).send('// Error: Default configuration could not be found in branch "${GIT_BRANCH}".');
       }
     }
 
     if (!coreJsContent) {
-        return response.status(500).send('Error: Core chatbot script could not be loaded.');
+      return response.status(500).send('// Error: Core chatbot script could not be loaded from branch "${GIT_BRANCH}".');
     }
 
-    const finalScript = `window.ChatWidgetConfig = ${finalConfigContent};\n\n${coreJsContent}`;
+    const finalScript = `// Branch: ${GIT_BRANCH}\nwindow.ChatWidgetConfig = ${finalConfigContent};\n\n${coreJsContent}`;
 
+    // Set the response content type
     response.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-    response.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate');
+
+    // Set cache headers based on the branch
+    if (GIT_BRANCH === 'test') {
+      // For the test branch, do not cache.
+      response.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      console.log('Cache disabled for "test" branch.');
+    } else {
+      // For the main (production) branch, cache for 1 hour.
+      response.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate');
+      console.log('Production cache set for "main" branch.');
+    }
 
     return response.status(200).send(finalScript);
 
