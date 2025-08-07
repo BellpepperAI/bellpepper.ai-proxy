@@ -108,7 +108,7 @@ export default async function handler(request, response) {
       response.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       console.log(`Cache disabled for non-production environment: "${VERCEL_ENV}"`);
     } else {
-      // For the production environment, cache for 1 hour.
+      // For the production environment, cache for 1 hour ('s-maxage=3600), currently disabled ('s-maxage=0).
       response.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate');
       console.log(`Production cache set for environment: "${VERCEL_ENV}"`);
     }
